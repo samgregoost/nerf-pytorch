@@ -204,7 +204,9 @@ def create_nerf(args):
                                                                 netchunk=args.netchunk)
 
     # Create optimizer
-    optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
+    optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate)
+  
+  #  optimizer = torch.optim.LBFGS(params=grad_vars, lr=1., max_iter=10, history_size=4)
 
     start = 0
     basedir = args.basedir
@@ -442,7 +444,7 @@ def config_parser():
                         help='channels per layer in fine network')
     parser.add_argument("--N_rand", type=int, default=32*32*4, 
                         help='batch size (number of random rays per gradient step)')
-    parser.add_argument("--lrate", type=float, default=5e-4, 
+    parser.add_argument("--lrate", type=float, default=5e-5,
                         help='learning rate')
     parser.add_argument("--lrate_decay", type=int, default=250, 
                         help='exponential learning rate decay (in 1000 steps)')
@@ -450,7 +452,7 @@ def config_parser():
                         help='number of rays processed in parallel, decrease if running out of memory')
     parser.add_argument("--netchunk", type=int, default=1024*64, 
                         help='number of pts sent through network in parallel, decrease if running out of memory')
-    parser.add_argument("--no_batching", action='store_true', 
+    parser.add_argument("--no_batching", action='store_false', 
                         help='only take random rays from 1 image at a time')
     parser.add_argument("--no_reload", action='store_true', 
                         help='do not reload weights from saved ckpt')
@@ -521,7 +523,7 @@ def config_parser():
                         help='frequency of console printout and metric loggin')
     parser.add_argument("--i_img",     type=int, default=500, 
                         help='frequency of tensorboard image logging')
-    parser.add_argument("--i_weights", type=int, default=10000, 
+    parser.add_argument("--i_weights", type=int, default=50000, 
                         help='frequency of weight ckpt saving')
     parser.add_argument("--i_testset", type=int, default=50000, 
                         help='frequency of testset saving')
@@ -529,6 +531,8 @@ def config_parser():
                         help='frequency of render_poses video saving')
 
     return parser
+
+
 
 
 def train():
@@ -698,7 +702,7 @@ def train():
         rays_rgb = torch.Tensor(rays_rgb).to(device)
 
 
-    N_iters = 200000 + 1
+    N_iters = 500000 + 1
     print('Begin')
     print('TRAIN views are', i_train)
     print('TEST views are', i_test)
@@ -763,25 +767,69 @@ def train():
 
         optimizer.zero_grad()
         img_loss = img2mse(rgb, target_s)
+     #   img_loss_ = img2mse(rgb, target_s)
         trans = extras['raw'][...,-1]
         loss = img_loss
+ #       loss = -10.*torch.log10(mse2psnr(img_loss))
         psnr = mse2psnr(img_loss)
 
+        '''
+        def closure():
+            optimizer.zero_grad()
+            rgb, disp, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
+                                                                    verbose=i < 10, retraw=True,
+                                                                        **render_kwargs_train)
+
+            img_loss = img2mse(rgb, target_s)
+            loss= img_loss
+            loss.backward()
+            return loss
+        '''
+        loss.backward()
+       # trans = extras['raw'][...,-1]
+      #  loss = img_loss
+                 #       loss = -10.*torch.log10(mse2psnr(img_loss))
+        optimizer.step()
+   #     loss = closure()
+    #    psnr = mse2psnr(loss)
+
+
+     #   rgb, disp, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
+      #                                                                              verbose=i < 10, retraw=True,
+       #                                                                                                                                                     **render_kwargs_train)
         if 'rgb0' in extras:
             img_loss0 = img2mse(extras['rgb0'], target_s)
             loss = loss + img_loss0
             psnr0 = mse2psnr(img_loss0)
 
-        loss.backward()
-        optimizer.step()
+
+      #  trans = extras['raw'][...,-1]
+     #           loss = img_loss
+                 #       loss = -10.*torch.log10(mse2psnr(img_loss))
+    #    psnr = mse2psnr(img_loss)
+    #    loss.backward()
+    #    optimizer.step(closure)
+        # if i == 50000:
+        #     optimizer = torch.optim.Adam(params=grad_vars, lr=1e-4, betas=(0.9, 0.999))
+        # elif i == 100000:
+        #     optimizer = torch.optim.Adam(params=grad_vars, lr=5e-5, betas=(0.9, 0.999))
+        # elif i == 150000:
+        #     optimizer = torch.optim.Adam(params=grad_vars, lr=1e-5, betas=(0.9, 0.999))
+        # elif i == 200000:
+        #     optimizer = torch.optim.Adam(params=grad_vars, lr=5e-6, betas=(0.9, 0.999))
 
         # NOTE: IMPORTANT!
         ###   update learning rate   ###
         decay_rate = 0.1
         decay_steps = args.lrate_decay * 1000
         new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = new_lrate
+     #   new_lrate = args.lrate*0.01**(1/200000)
+    
+    
+    
+     #   for param_group in optimizer.param_groups:
+      
+        #param_group['lr'] = new_lrate
         ################################
 
         dt = time.time()-time0
@@ -794,7 +842,7 @@ def train():
             torch.save({
                 'global_step': global_step,
                 'network_fn_state_dict': render_kwargs_train['network_fn'].state_dict(),
-                'network_fine_state_dict': render_kwargs_train['network_fine'].state_dict(),
+               # 'network_fine_state_dict': render_kwargs_train['network_fine'].state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
             }, path)
             print('Saved checkpoints at', path)

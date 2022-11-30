@@ -33,10 +33,10 @@ class Embedder:
         else:
             freq_bands = torch.linspace(2.**0., 2.**max_freq, steps=N_freqs)
             
-        for freq in freq_bands:
-            for p_fn in self.kwargs['periodic_fns']:
-                embed_fns.append(lambda x, p_fn=p_fn, freq=freq : p_fn(x * freq))
-                out_dim += d
+        # for freq in freq_bands:
+        #     for p_fn in self.kwargs['periodic_fns']:
+        #         embed_fns.append(lambda x, p_fn=p_fn, freq=freq : p_fn(x * freq))
+        #         out_dim += d
                     
         self.embed_fns = embed_fns
         self.out_dim = out_dim
@@ -64,23 +64,65 @@ def get_embedder(multires, i=0):
 
 
 # Model
-class NeRF(nn.Module):
-    def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False):
+
+class GaussLayer(nn.Module):
+
+    def __init__(self, in_features, out_features, bias=True,
+                 is_first=False, omega_0=10):
+        super().__init__()
+        self.omega_0 = omega_0
+        self.is_first = is_first
+
+        self.in_features = in_features
+        self.linear = nn.Linear(in_features, out_features, bias=bias)
+
+        self.init_weights()
+
+    def init_weights(self):
+        with torch.no_grad():
+            if self.is_first:
+                self.linear.weight.uniform_(-1 / self.in_features,
+                                            1 / self.in_features)
+            else:
+                self.linear.weight.uniform_(-np.sqrt(6 / self.in_features) / self.omega_0,
+                                            np.sqrt(6 / self.in_features) / self.omega_0)
+
+    def forward(self, input):
+        input = self.linear(input)
+        return (-0.5 * (input) ** 2 / (self.omega_0 * 0.001) ** 2).exp()
+
+
+
+class NeRF(torch.jit.ScriptModule):
+    def __init__(self, D=6, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False):
         """ 
         """
         super(NeRF, self).__init__()
-        self.D = D
+        self.D = 8
         self.W = W
         self.input_ch = input_ch
         self.input_ch_views = input_ch_views
-        self.skips = skips
+        self.skips = [4]#skips
         self.use_viewdirs = use_viewdirs
-        
+        self.gaulin1 = nn.Linear(3, W)
+        self.gaulin2 = nn.Linear(3, W)
+
         self.pts_linears = nn.ModuleList(
-            [nn.Linear(input_ch, W)] + [nn.Linear(W, W) if i not in self.skips else nn.Linear(W + input_ch, W) for i in range(D-1)])
+            [GaussLayer(W, W,
+                      is_first=False, omega_0=15.)] +
+            [GaussLayer(W, W,
+                      is_first=False, omega_0=15.) if i not in self.skips else GaussLayer(W+W, W,
+                      is_first=False, omega_0=15.) for i in range(D - 1)])
+
+
+       # self.pts_linears = nn.ModuleList(
+        #    [nn.Linear(W, W)] + [nn.Linear(W, W) if i not in self.skips else nn.Linear(W + W, W) for i in range(D-1)])
         
         ### Implementation according to the official code release (https://github.com/bmild/nerf/blob/master/run_nerf_helpers.py#L104-L105)
-        self.views_linears = nn.ModuleList([nn.Linear(input_ch_views + W, W//2)])
+        self.views_linears = nn.ModuleList([nn.Linear(W + W, W//2)])
+
+        self.input_firstLayer = GaussLayer(3, W, is_first=True, omega_0=15.)
+        self.view_firstLayer = GaussLayer(3, W, is_first=True, omega_0=20.)
 
         ### Implementation according to the paper
         # self.views_linears = nn.ModuleList(
@@ -93,12 +135,78 @@ class NeRF(nn.Module):
         else:
             self.output_linear = nn.Linear(W, output_ch)
 
+
+
+
+
+   # @torch.jit.script_method
+    def gau(self, x):
+   
+        # mu = torch.mean(x, axis = 1).unsqueeze(1)
+        
+        return (-0.5*(x)**2/0.1**2).exp()# +  (-0.5*(x+0.2)**2/0.1**2).exp() + (-0.5*(x - 0.2)**2/0.1**2).exp()# +  (-0.5*(x-0.2)**2/0.11**2).exp() + (-0.5*(x - 0.3)**2/0.09**2).exp()  #/(np.sqrt(2*np.pi)*0.3)
+  #  @torch.jit.script_method
+    def gau_end(self, x):
+   
+        # mu = torch.mean(x, axis = 1).unsqueeze(1)
+        return (-0.5*(x)**2/0.1**2).exp()# + (-0.5*(x+0.2)**2/0.1**2).exp() + (-0.5*(x + 0.3)**2/0.1**2).exp() +  (-0.5*(x-0.2)**2/0.1**2).exp() + (-0.5*(x - 0.3)**2/0.1**2).exp() #/(np.sqrt(2*np.pi)*0.3)
+
+ #   @torch.jit.script_method
+    def gauinit1(self, x):
+        x = self.gaulin1(x)
+        # mu = torch.mean(x_, axis = 1).unsqueeze(1)
+    #    k1 = torch.tanh(x_)
+        k1 = (-0.5*(x)**2/0.1**2).exp()# + (-0.5*(x+0.2)**2/0.1**2).exp() + (-0.5*(x - 0.2)**2/0.1**2).exp()# +  (-0.5*(x-0.2)**2/0.1**2).exp() + (-0.5*(x - 0.3)**2/0.1**2).exp() 
+        return k1#/(np.sqrt(2*np.pi)*0.3)
+#    @torch.jit.script_method
+    def gauinit2(self, x):
+        x = self.gaulin2(x)
+        # mu = torch.mean(x_, axis = 1).unsqueeze(1)
+       # k1 = torch.tanh(x_)
+        k1 = (-0.5*(x)**2/0.1**2).exp()# + (-0.5*(x+0.2)**2/0.1**2).exp() + (-0.5*(x -0.2)**2/0.1**2).exp()# +  (-0.5*(x-0.2)**2/0.1**2).exp() + (-0.5*(x - 0.3)**2/0.1**2).exp() 
+        return k1#/(np.sqrt(2*np.pi)*0.3)
+    
     def forward(self, x):
         input_pts, input_views = torch.split(x, [self.input_ch, self.input_ch_views], dim=-1)
+        
+   #     input_pts = input_pts[:,:3]
+       # input_pts_f = input_pts[:,3:]
+  #      input_pts = torch.tanh(input_pts)
+        input_pts = (input_pts)/3
+      #  input_pts = self.gauinit1(input_pts)
+       # input_pts_f =(input_pts_f + 1)/4
+      #  input_pts = torch.cat([input_pts_c, input_pts_f], -1)
+      #  print(torch.max(input_pts))
+      #  print(torch.min(input_pts))
+   #     input_views = torch.tanh(input_views) #(input_views + 1)/2
+  #      input_views = self.gauinit2(input_views)
+      #  print(torch.max(input_views))
+      #  print(torch.min(input_views))
+       # input_pts = self.gauembed(input_pts)
+
+        input_pts = self.input_firstLayer(input_pts) # GaussLayer(, W, is_first=True, omega_0=20.)
+
+
+     #   input_pts = self.gauinit2(input_pts)
         h = input_pts
+
+       # input_views = self.gauembed2(input_views)
+
+
+    #    input_views = self.gauinit1(input_views)
+        input_views = self.view_firstLayer(input_views)
+
+     #   print("#####################################")
         for i, l in enumerate(self.pts_linears):
+      #      print("I am here")
+   #         print(h.shape)
             h = self.pts_linears[i](h)
-            h = F.relu(h)
+     #       if i == self.D-1:
+      #          print("######################################")
+          #  h = torch.nn.functional.softplus(h)
+          #  else:
+         #   h = self.gau(h)
+
             if i in self.skips:
                 h = torch.cat([input_pts, h], -1)
 
@@ -106,10 +214,11 @@ class NeRF(nn.Module):
             alpha = self.alpha_linear(h)
             feature = self.feature_linear(h)
             h = torch.cat([feature, input_views], -1)
-        
+         #   print(h.shape)
+         #   print(input_views.shape)
             for i, l in enumerate(self.views_linears):
                 h = self.views_linears[i](h)
-                h = F.relu(h)
+                h = torch.nn.functional.softplus(h)
 
             rgb = self.rgb_linear(h)
             outputs = torch.cat([rgb, alpha], -1)
